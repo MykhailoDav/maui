@@ -31,6 +31,11 @@ namespace Microsoft.Maui.Platform
 		internal IView? VirtualView { get; private set; }
 		internal IStackNavigation? NavigationView { get; private set; }
 		internal bool IsNavigating => ActiveRequestedArgs != null;
+
+		// NavigationPage rebuilds its cross-platform state from the stack this reconciliation
+		// completes with; Shell keeps its own section stack that the completion does not
+		// update, so its manager opts out
+		internal virtual bool ReconcilesExternallyPoppedStacks => true;
 		internal bool IsInitialNavigation { get; private set; }
 		internal bool? IsPopping { get; private set; }
 		internal bool IsAnimated { get; set; } = true;
@@ -513,8 +518,21 @@ namespace Microsoft.Maui.Platform
 						.NavigatorProvider
 						.GetNavigator(Java.Lang.Class.FromType(typeof(FragmentNavigator)));
 
-				NavController.SetGraph(NavGraph, null);
-				_fragmentLifecycleCallbacks = new Callbacks(this, NavController, ChildFragmentManager);
+				// Installing the graph on the replacement NavController makes the freshly
+				// registered destination listener report the start destination right away;
+				// that notification is graph restoration, not a native pop to reconcile
+				var wasApplyingNavigationRequest = _applyingNavigationRequest;
+				_applyingNavigationRequest = true;
+
+				try
+				{
+					NavController.SetGraph(NavGraph, null);
+					_fragmentLifecycleCallbacks = new Callbacks(this, NavController, ChildFragmentManager);
+				}
+				finally
+				{
+					_applyingNavigationRequest = wasApplyingNavigationRequest;
+				}
 			}
 		}
 
@@ -586,19 +604,41 @@ namespace Microsoft.Maui.Platform
 		// AndroidX callback while the push transition was still running. Without this the
 		// pending navigation never finishes: the Task returned by PushAsync never completes
 		// and the cross-platform stack keeps a page that is no longer on screen.
+		//
+		// Only an in-flight request reconciles. A freshly registered destination listener
+		// reports the current destination (e.g. after the nav host was recreated), and on a
+		// settled stack that report must not rewrite history or complete anything.
 		void ReconcileExternallyPoppedStack()
 		{
-			if (_applyingNavigationRequest || IsInitialNavigation || NavigationStack.Count == 0 || _navHost is null)
+			if (!ReconcilesExternallyPoppedStacks || !IsNavigating || _applyingNavigationRequest ||
+				IsInitialNavigation || NavigationStack.Count == 0 || _navHost is null)
 				return;
 
-			int platformCount = 0;
-			NavController.IterateBackStack(_ => platformCount++);
+			var onStackIds = new HashSet<int>();
+			NavController.IterateBackStack(d => onStackIds.Add(d.Id));
 
-			if (platformCount == 0 || platformCount >= NavigationStack.Count)
+			if (onStackIds.Count == 0 || onStackIds.Count >= NavigationStack.Count)
 				return;
+
+			// Drop the natively popped destinations from the graph, like ApplyNavigationRequestCore
+			// does for requested pops; a stale destination makes every later back-stack iteration
+			// throw (and catch) a Java IllegalArgumentException
+			List<NavDestination>? staleDestinations = null;
+			var graphIterator = NavGraph.Iterator();
+			while (graphIterator.HasNext)
+			{
+				if (graphIterator.Next() is FragmentNavigator.Destination destination && !onStackIds.Contains(destination.Id))
+					(staleDestinations ??= new List<NavDestination>()).Add(destination);
+			}
+
+			if (staleDestinations is not null)
+			{
+				foreach (var destination in staleDestinations)
+					NavGraph.Remove(destination);
+			}
 
 			var newStack = new List<IView>();
-			for (int i = 0; i < platformCount; i++)
+			for (int i = 0; i < onStackIds.Count; i++)
 				newStack.Add(NavigationStack[i]);
 
 			UpdateNavigationStack(newStack);

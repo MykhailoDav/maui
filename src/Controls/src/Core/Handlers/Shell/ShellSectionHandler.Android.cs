@@ -1169,6 +1169,11 @@ namespace Microsoft.Maui.Controls.Handlers
             _handler = handler;
         }
 
+        // Shell completes navigation through ShellContentNavigationFragment.OnNavigationFinished,
+        // which never syncs ShellSection.Stack from the completion stack; reconciling here would
+        // leave the section stack and the manager stack disagreeing
+        internal override bool ReconcilesExternallyPoppedStacks => false;
+
         public override AAnimation? OnCreateNavigationAnimation(
             Context context, bool isPopping, bool enter)
         {
