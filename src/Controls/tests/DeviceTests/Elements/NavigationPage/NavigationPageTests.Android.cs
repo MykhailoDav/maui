@@ -52,6 +52,31 @@ namespace Microsoft.Maui.DeviceTests
 				Assert.True(navPage.Navigation.NavigationStack.Count == 1,
 					$"NavigationStack is out of sync with the screen (count {navPage.Navigation.NavigationStack.Count})");
 				Assert.Same(root, navPage.CurrentPage);
+
+				// The natively popped destination must also be gone from the NavGraph:
+				// a stale destination makes every later back-stack iteration throw (and
+				// catch) a Java IllegalArgumentException, the noise removed by #39183
+				var exceptionMessages = new List<string>();
+				AppDomain.CurrentDomain.FirstChanceException += OnFirstChanceException;
+
+				try
+				{
+					await navPage.PushAsync(new ContentPage { Title = "Third" }, false);
+					await navPage.PopAsync(false);
+				}
+				finally
+				{
+					AppDomain.CurrentDomain.FirstChanceException -= OnFirstChanceException;
+				}
+
+				Assert.Empty(exceptionMessages);
+				Assert.Same(root, navPage.CurrentPage);
+
+				void OnFirstChanceException(object sender, System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs e)
+				{
+					if (e.Exception is Java.Lang.IllegalArgumentException)
+						exceptionMessages.Add(e.Exception.Message);
+				}
 			});
 		}
 
